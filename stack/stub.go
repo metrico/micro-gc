@@ -2,9 +2,9 @@
 
 package stack
 
-func Stack_push() {
+func PushStack() {
 }
 
 // PopStack pops a context from the stack
-func Stack_pop() {
+func PopStack() {
 }
