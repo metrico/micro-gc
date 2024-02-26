@@ -1,4 +1,5 @@
-# MicroGC - small and unhandy (yet working) GC for tiny-go + wasm
+# MicroGC
+> small and unhandy _(yet working)_ GC for tiny-go + wasm
 
 ## Leaking + Stack GC for tiny go + wasm
 
