@@ -1,9 +1,8 @@
 //go:build gc.custom
 
-package microgc
+package stack
 
 import (
-	"fmt"
 	"runtime"
 	"unsafe"
 )
@@ -29,45 +28,32 @@ var (
 	gcMallocs    uint64
 	gcTotalAlloc uint64
 	gcFrees      uint64
+	heapReleased uint64
 	//allocatedBlocks = make(map[uintptr]uintptr)
 )
 
-//export llvm.wasm.memory.size.i32
-func wasm_memory_size(index int32) int32
-
-//export llvm.wasm.memory.grow.i32
-func wasm_memory_grow(index int32, delta int32) int32
-
-//go:linkname align runtime.align
-func align(p uintptr) uintptr
-
-//go:linkname memzero runtime.memzero
-func memzero(ptr unsafe.Pointer, size uintptr)
-
-// like llvm.memcpy.p0.p0.i32(dst, src, size, false).
-func memcpy(dst, src unsafe.Pointer, size uintptr)
-
-// Map to store allocated memory blocks and their sizes
-var allocatedBlocks = make(map[uintptr]uintptr)
-
-// Stack_push pushes a new context onto the stack
-func Stack_push() {
+// PushStack pushes a new context onto the stack
+func PushStack() {
 	var c Context
 	c.start = heapptr
 	contextIndex++
 	context[contextIndex] = c
 }
 
-// Stack_pop pops a context from the stack
-func Stack_pop() {
-	if contextIndex >= 0 {
+// PopStack pops a context from the stack
+func PopStack() {
+	if contextIndex > 0 {
 		c := context[contextIndex]
-		heapptr = c.start
+		_heapptr := c.start
 		contextIndex--
-
+		heapReleased += uint64(heapptr - _heapptr)
+		heapptr = _heapptr
 	} else {
-		fmt.Println("Error: Stack underflow - cannot pop from an empty stack")
+		_heapptr := heapStart
+		heapReleased += uint64(heapptr - _heapptr)
+		heapptr = _heapptr
 	}
+	gcFrees++
 }
 
 //go:linkname alloc runtime.alloc
@@ -93,8 +79,6 @@ func realloc(ptr unsafe.Pointer, size uintptr) unsafe.Pointer {
 	if ptr == nil {
 		return newAlloc
 	}
-	// according to POSIX everything beyond the previous pointer's
-	// size will have indeterminate values so we can just copy garbage
 	memcpy(newAlloc, ptr, size)
 	return newAlloc
 }
@@ -117,26 +101,23 @@ func ReadMemStats(m *runtime.MemStats) {
 	if m == nil {
 		return
 	}
-	m.HeapIdle = 0 // These values are dummy values. Replace them with actual values if available.
+	m.HeapIdle = uint64(heapEnd - heapptr)
 	m.HeapInuse = uint64(heapptr - heapStart)
-	m.HeapReleased = 0
-	m.HeapSys = m.HeapInuse
-	m.GCSys = 0
+	m.HeapReleased = heapReleased
+	m.HeapSys = uint64(heapEnd - heapStart)
+	m.GCSys = uint64(unsafe.Sizeof(context)) + 96 //[1024]Context + all the vars on the top of the file
 	m.TotalAlloc = gcTotalAlloc
 	m.Mallocs = gcMallocs
 	m.Frees = gcFrees
-	m.Sys = uint64(heapEnd - heapStart)
+	m.Sys = uint64(wasm_memory_size(wasmMemoryIndex) * wasmPageSize)
 }
 
 //go:linkname initHeap runtime.initHeap
 func initHeap() {
-	wasm_memory_grow(wasmMemoryIndex, wasmPageSize)
 }
 
 //go:linkname markRoots runtime.markRoots
-func markRoots(start, end uintptr) {
-	panic("not implemented #7")
-}
+func markRoots(start, end uintptr) {}
 
 // setHeapEnd sets a new (larger) heapEnd pointer.
 func setHeapEnd(newHeapEnd uintptr) {
