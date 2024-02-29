@@ -6,14 +6,14 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
 const (
 	wasmMemoryIndex      = 0
 	wasmPageSize         = 64 * 1024
-	maxMemoryAllocations = 1024000
-	maxHeapSize          = 32 * 1024 * 1024
+	maxMemoryAllocations = 1024 * 1024
 )
 
 type Context struct {
@@ -41,131 +41,114 @@ var (
 
 // SetContext sets the current context ID.
 func SetContext(ctxID uint32) {
-	contextMutex.Lock()
-	defer contextMutex.Unlock()
-	currentContextID = ctxID
-
-	fmt.Println("Set context value", ctxID)
+	atomic.StoreUint32(&currentContextID, ctxID)
 }
 
 // ReleaseContext releases the memory associated with the given context ID.
 func ReleaseContext(ctxID uint32) {
 	contextMutex.Lock()
 	defer contextMutex.Unlock()
-	var newMemoryAllocRegistry [maxMemoryAllocations]Context
-	var newMemoryAllocRegistryLen uint32
+	var (
+		i uint32 = 0
+	)
 
-	fmt.Println("release context value", ctxID)
-	for i := uint32(0); i < memoryAllocRegistryLen; i++ {
-		if memoryAllocRegistry[i].ID != ctxID {
-			newMemoryAllocRegistry[newMemoryAllocRegistryLen] = memoryAllocRegistry[i]
-			newMemoryAllocRegistryLen++
+	for j := range memoryAllocRegistry[:memoryAllocRegistryLen] {
+		if memoryAllocRegistry[j].ID != ctxID {
+			memoryAllocRegistry[i] = memoryAllocRegistry[j]
+			i++
+		} else {
+			heapReleased += uint64(memoryAllocRegistry[j].End - memoryAllocRegistry[j].Start)
 		}
 	}
-	if newMemoryAllocRegistryLen < memoryAllocRegistryLen {
-		copy(memoryAllocRegistry[:newMemoryAllocRegistryLen], newMemoryAllocRegistry[:newMemoryAllocRegistryLen])
-		memoryAllocRegistryLen = newMemoryAllocRegistryLen
+	memoryAllocRegistryLen = i
+	if i > 0 {
+		heapptr = memoryAllocRegistry[i-1].End
+	} else {
+		heapptr = heapStart
 	}
-
 }
 
 // GetContextID returns the current context ID.
 func GetContextID() uint32 {
-	contextMutex.Lock()
-	defer contextMutex.Unlock()
-	return currentContextID
-
+	return atomic.LoadUint32(&currentContextID)
 }
 
 //go:linkname alloc runtime.alloc
 func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
+	contextMutex.Lock()
+	defer contextMutex.Unlock()
 	size = align(size)
-	// Check if there's enough space available in the heap
-	if heapptr+size > heapEnd {
-		if !growHeap() {
-			fmt.Println("Failed to allocate memory: heap size exceeded")
-			return nil
-		}
-	}
-	// Initialize start, end, and heapptr if it's the first allocation
-	if memoryAllocRegistryLen == 0 {
-		start := heapStart
-		end := heapStart + size
+	ctxId := atomic.LoadUint32(&currentContextID)
 
-		// Update memory allocation registry with the new block
-		memoryAllocRegistry[0] = Context{
-			ID:      currentContextID,
+	_size := (size + wasmPageSize - 1) / wasmPageSize * wasmPageSize
+
+	if idx := getContextByIdAndFreeSize(ctxId, size); idx != -1 {
+		res := memoryAllocRegistry[idx].HeapPtr
+		memoryAllocRegistry[idx].HeapPtr += size
+		return unsafe.Pointer(res)
+	} else if freeIdx := getFreeSpace(size); freeIdx != -1 {
+		copy(memoryAllocRegistry[freeIdx+1:], memoryAllocRegistry[freeIdx:])
+		start := heapStart
+		if freeIdx > 0 {
+			start = memoryAllocRegistry[freeIdx-1].End
+		}
+		memoryAllocRegistry[freeIdx] = Context{
+			ID:      ctxId,
 			Start:   start,
-			End:     end,
+			End:     start + _size,
 			HeapPtr: start + size,
 		}
 		memoryAllocRegistryLen++
 
-		// Update heap pointer and statistics
-		heapptr = end
-		gcTotalAlloc += uint64(size)
+		gcTotalAlloc += uint64(_size)
 		gcMallocs++
-		memzero(unsafe.Pointer(start), size)
-		// Return pointer to allocated memory
-		return unsafe.Pointer(start)
+		memzero(unsafe.Pointer(memoryAllocRegistry[freeIdx].Start), _size)
+
+		return unsafe.Pointer(memoryAllocRegistry[freeIdx].Start)
 	}
-
-	// Search for free space between contexts
-	for i := 0; i < int(memoryAllocRegistryLen)-1; i++ {
-		if memoryAllocRegistry[i+1].Start-memoryAllocRegistry[i].End >= size {
-			// Found free space between contexts, insert new entry
-			start := memoryAllocRegistry[i].End
-			end := start + size
-
-			// Shift existing entries to accommodate the new block
-			for j := int(memoryAllocRegistryLen); j > i+1; j-- {
-				memoryAllocRegistry[j] = memoryAllocRegistry[j-1]
-			}
-
-			memoryAllocRegistry[i+1] = Context{
-				ID:      currentContextID,
-				Start:   start,
-				End:     end,
-				HeapPtr: end, // Move heap pointer to end of allocated block
-			}
-			memoryAllocRegistryLen++
-
-			// Update heap pointer and statistics
-			heapptr = end
-			gcTotalAlloc += uint64(size)
-			gcMallocs++
-			memzero(unsafe.Pointer(start), size)
-			// Return pointer to allocated memory
-			return unsafe.Pointer(start)
-		}
-	}
-
-	// If no free space between contexts is found, allocate at the end
-	start := memoryAllocRegistry[memoryAllocRegistryLen-1].End
-	end := start + size
-	// Check if the allocation exceeds the heapEnd
-	if end > heapEnd {
+	for heapptr+size > heapEnd {
 		if !growHeap() {
 			fmt.Println("Failed to allocate memory: heap size exceeded")
 			return nil
 		}
 	}
-
 	memoryAllocRegistry[memoryAllocRegistryLen] = Context{
-		ID:      currentContextID,
-		Start:   start,
-		End:     end,
-		HeapPtr: end, // Move heap pointer to end of allocated block
+		ID:      ctxId,
+		Start:   heapptr,
+		End:     heapptr + _size,
+		HeapPtr: heapptr + size,
 	}
 	memoryAllocRegistryLen++
+	heapptr += _size
 
-	// Update heap pointer and statistics
-	heapptr = end
-	gcTotalAlloc += uint64(size)
+	gcTotalAlloc += uint64(_size)
 	gcMallocs++
-	memzero(unsafe.Pointer(start), size)
-	pointer := unsafe.Pointer(start)
-	return pointer
+	memzero(unsafe.Pointer(memoryAllocRegistry[memoryAllocRegistryLen-1].Start), size)
+	return unsafe.Pointer(memoryAllocRegistry[memoryAllocRegistryLen-1].Start)
+}
+
+func getContextByIdAndFreeSize(ctxID uint32, size uintptr) int32 {
+	for i := range memoryAllocRegistry[:memoryAllocRegistryLen] {
+		if memoryAllocRegistry[i].ID == ctxID && memoryAllocRegistry[i].End-memoryAllocRegistry[i].HeapPtr >= size {
+			return int32(i)
+		}
+	}
+	return -1
+}
+
+func getFreeSpace(size uintptr) int32 {
+	if memoryAllocRegistryLen == 0 {
+		return -1
+	}
+	if memoryAllocRegistryLen == 1 && memoryAllocRegistry[0].Start-heapStart >= size {
+		return 0
+	}
+	for i := range memoryAllocRegistry[:memoryAllocRegistryLen-1] {
+		if memoryAllocRegistry[i+1].Start-memoryAllocRegistry[i].End >= size {
+			return int32(i + 1)
+		}
+	}
+	return -1
 }
 
 //go:linkname free runtime.free
@@ -210,7 +193,8 @@ func ReadMemStats(m *runtime.MemStats) {
 
 //go:linkname initHeap runtime.initHeap
 func initHeap() {
-
+	atomic.StoreUint32(&currentContextID, 0)
+	alloc(1, nil)
 }
 
 //go:linkname markRoots runtime.markRoots
