@@ -8,6 +8,6 @@ func SetContext(ctxID uint32) {
 func ReleaseContext(ctxID uint32) {
 }
 
-func GetContext() uint32 {
+func GetContextID() uint32 {
 
 }
