@@ -86,7 +86,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		res := memoryAllocRegistry[idx].HeapPtr
 		memoryAllocRegistry[idx].HeapPtr += size
 		return unsafe.Pointer(res)
-	} else if freeIdx := getFreeSpace(size); freeIdx != -1 {
+	} else if freeIdx := getFreeSpace(_size); freeIdx != -1 {
 		copy(memoryAllocRegistry[freeIdx+1:], memoryAllocRegistry[freeIdx:])
 		start := heapStart
 		if freeIdx > 0 {
@@ -106,7 +106,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 
 		return unsafe.Pointer(memoryAllocRegistry[freeIdx].Start)
 	}
-	for heapptr+size > heapEnd {
+	for heapptr+_size > heapEnd {
 		if !growHeap() {
 			fmt.Println("Failed to allocate memory: heap size exceeded")
 			return nil
@@ -206,8 +206,7 @@ func setHeapEnd(newHeapEnd uintptr) {
 }
 
 func growHeap() bool {
-	memorySize := wasm_memory_size(wasmMemoryIndex)
-	result := wasm_memory_grow(wasmMemoryIndex, memorySize)
+	result := wasm_memory_grow(wasmMemoryIndex, 256)
 	if result == -1 {
 		return false
 	}
