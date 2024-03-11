@@ -102,7 +102,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 
 		gcTotalAlloc += uint64(_size)
 		gcMallocs++
-		memzero(unsafe.Pointer(memoryAllocRegistry[freeIdx].Start), size)
+		memzero(unsafe.Pointer(memoryAllocRegistry[freeIdx].Start), _size)
 
 		return unsafe.Pointer(memoryAllocRegistry[freeIdx].Start)
 	}
@@ -123,7 +123,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 
 	gcTotalAlloc += uint64(_size)
 	gcMallocs++
-	memzero(unsafe.Pointer(memoryAllocRegistry[memoryAllocRegistryLen-1].Start), size)
+	memzero(unsafe.Pointer(memoryAllocRegistry[memoryAllocRegistryLen-1].Start), _size)
 	return unsafe.Pointer(memoryAllocRegistry[memoryAllocRegistryLen-1].Start)
 }
 
